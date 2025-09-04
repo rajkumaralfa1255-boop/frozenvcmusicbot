@@ -7,6 +7,7 @@ import logging
 import asyncio
 import random
 import speech_recognition as sr
+import requests
 from pydub import AudioSegment
 from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
@@ -31,8 +32,7 @@ API_HASH = os.environ.get("API_HASH")
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 OWNER_ID = int(os.getenv("OWNER_ID", "5268762773"))
 LOG_CHANNEL_ID = int(os.getenv("LOG_CHANNEL_ID", None))
-RSS_FEED_URL = os.environ.get("RSS_FEED_URL", "https://www.youtube.com/feeds/videos.xml?channel_id=UC-K20bY-dK_9e17W3K-252A")
-RSS_CHANNEL_ID = int(os.getenv("RSS_CHANNEL_ID", None))
+OPENWEATHER_API_KEY = os.environ.get("OPENWEATHER_API_KEY", None)
 
 # Initialize the bot client
 session_name = os.environ.get("SESSION_NAME", "help_bot")
@@ -42,16 +42,14 @@ bot = Client(session_name, bot_token=BOT_TOKEN, api_id=API_ID, api_hash=API_HASH
 BOT_NAME = os.environ.get("BOT_NAME", "Frozen Help Bot")
 BOT_LINK = os.environ.get("BOT_LINK", f"https://t.me/{bot.get_me().username}")
 
-# In-memory storage for user stats, notes, and other data
+# In-memory storage for various data
 user_stats = {}
-last_rss_entry_link = ""
 premium_users = set()
 FAQ_DATA = {
     "rules": "ग्रुप के नियम:\n1. कोई स्पैमिंग नहीं\n2. कोई गाली-गलौज नहीं\n3. केवल ग्रुप से संबंधित बातें।",
     "help": "मैं आपकी मदद कैसे कर सकता हूँ? `/help` कमांड का प्रयोग करें या नीचे दिए गए बटन पर क्लिक करें।",
     "contact": "एडमिन से संपर्क करने के लिए @Frozensupport1 पर मैसेज करें।",
 }
-
 warn_counts = {}
 user_message_timestamps = {}
 scheduled_messages = []
@@ -60,35 +58,59 @@ auto_delete_timers = {}
 notes_data = {}
 gban_list = set()
 custom_welcome_messages = {}
+link_whitelist = set()
+restricted_file_types = set()
+
+# Load data from file if it exists
+def load_data():
+    global notes_data, gban_list
+    try:
+        with open("bot_data.json", "r") as f:
+            data = json.load(f)
+            notes_data = data.get("notes_data", {})
+            gban_list.update(data.get("gban_list", []))
+            print("Data loaded successfully.")
+    except (FileNotFoundError, json.JSONDecodeError):
+        print("No existing data file found or file is empty.")
+
+# Save data to file
+def save_data():
+    data = {
+        "notes_data": notes_data,
+        "gban_list": list(gban_list)
+    }
+    with open("bot_data.json", "w") as f:
+        json.dump(data, f, indent=4)
+    print("Data saved successfully.")
 
 # Auto-mute on low messages settings
 LOW_MSG_MUTE_THRESHOLD = 5
 LOW_MSG_MUTE_TIME = 300 # 5 minutes
 
-# Pre-defined quotes list
-QUOTES = [
-    "सपने वो नहीं होते जो हम सोते हुए देखते हैं, सपने वो होते हैं जो हमें सोने नहीं देते। - अब्दुल कलाम",
-    "जो लोग खुद से प्यार करते हैं, वे दुनिया को बदलने की शक्ति रखते हैं। - महात्मा गांधी",
-    "सफलता की खुशी का अनुभव करने से पहले, इंसान को असफलता का अनुभव करना चाहिए। - डॉ. ए.पी.जे. अब्दुल कलाम",
-    "अगर तुम सूरज की तरह चमकना चाहते हो, तो पहले सूरज की तरह जलना सीखो। - डॉ. ए.पी.जे. अब्दुल कलाम",
-    "कर्मभूमि पर फल के लिए श्रम सबको करना पड़ता है, भगवान सिर्फ लकीरें देता है, रंग हमें खुद भरना पड़ता है। - अज्ञात",
-]
+# Pre-defined game data
+TRUTH_QUESTIONS = ["क्या आपने कभी अपने दोस्त को झूठ बोला है?", "आपकी सबसे अजीब आदत क्या है?", "आपकी सबसे बड़ी डर क्या है?", "आपने अपने जीवन में सबसे अजीब काम क्या किया है?"]
+DARE_CHALLENGES = ["अपनी प्रोफ़ाइल फ़ोटो 1 घंटे के लिए बदलें।", "ग्रुप में एक जोक सुनाएं।", "1 मिनट तक अपनी नाक पर अपनी उंगली रखें।", "ग्रुप में एक अजीबोगरीब आवाज़ निकालें।"]
+TRIVIA_QUESTIONS = {
+    "भारत की राजधानी क्या है?": "दिल्ली",
+    "सूर्य से सबसे निकटतम ग्रह कौन सा है?": "बुध",
+    "राष्ट्रीय गान किसने लिखा था?": "रवींद्रनाथ टैगोर",
+    "सबसे बड़ा महासागर कौन सा है?": "प्रशांत महासागर",
+}
+trivia_game = {}
 
 # --- Helper functions ---
-
-# Recreating the privilege validator function
 async def is_admin_or_owner(message: Message):
     if message.from_user.id == OWNER_ID:
         return True
     
-    chat_member: ChatMember = await message._client.get_chat_member(
-        chat_id=message.chat.id,
-        user_id=message.from_user.id
-    )
-    return chat_member.status in [
-        ChatMemberStatus.ADMINISTRATOR,
-        ChatMemberStatus.OWNER
-    ]
+    try:
+        chat_member: ChatMember = await message._client.get_chat_member(
+            chat_id=message.chat.id,
+            user_id=message.from_user.id
+        )
+        return chat_member.status in [ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER]
+    except Exception:
+        return False
 
 def to_bold_unicode(text: str) -> str:
     bold_text = ""
@@ -96,7 +118,7 @@ def to_bold_unicode(text: str) -> str:
         if 'A' <= char <= 'Z':
             bold_text += chr(ord('𝗔') + (ord(char) - ord('A')))
         elif 'a' <= char <= 'z':
-            bold_text += chr(ord('𝗮') + (ord('char') - ord('a')))
+            bold_text += chr(ord('𝗮') + (ord(char) - ord('a')))
         else:
             bold_text += char
     return bold_text
@@ -116,7 +138,7 @@ async def extract_target_user(message: Message):
     try:
         user = await message._client.get_users(target)
         return user
-    except:
+    except Exception:
         await message.reply("❌ यह यूज़र नहीं मिला।")
         return None
 
@@ -266,6 +288,7 @@ async def go_back_callback(_, callback_query):
         parse_mode=ParseMode.MARKDOWN,
         reply_markup=reply_markup
     )
+
 # --- Welcome/Onboarding Feature ---
 @bot.on_message(filters.new_chat_members)
 async def welcome_new_member(client, message):
@@ -301,6 +324,21 @@ async def set_welcome_message(client, message):
     
     custom_welcome_messages[message.chat.id] = parts[1]
     await message.reply("✅ कस्टम वेलकम मैसेज सेट हो गया है।")
+
+@bot.on_message(filters.group & filters.command("setphotowelcome"))
+async def set_photo_welcome(client, message):
+    if not await is_admin_or_owner(message):
+        return await message.reply("❌ आप यह कमांड इस्तेमाल नहीं कर सकते।")
+    
+    if not message.reply_to_message or not message.reply_to_message.photo:
+        return await message.reply("❌ कृपया एक फ़ोटो पर रिप्लाई करें।")
+
+    caption = message.text.split(" ", 1)
+    if len(caption) < 2:
+        return await message.reply("❌ कृपया फ़ोटो के साथ वेलकम टेक्स्ट भी दें।")
+
+    custom_welcome_messages[message.chat.id] = {"photo": message.reply_to_message.photo.file_id, "caption": caption[1]}
+    await message.reply("✅ फ़ोटो के साथ वेलकम मैसेज सेट हो गया है।")
 
 @bot.on_callback_query(filters.regex("rules_accepted"))
 async def handle_rules_accepted(client, callback_query):
@@ -444,7 +482,7 @@ async def delete_message(client, message):
 # --- Anti-Abuse & Security ---
 @bot.on_message(filters.group & ~filters.me & ~filters.via_bot)
 async def anti_abuse_filter(client, message):
-    if message.from_user.id in gban_list:
+    if message.from_user and message.from_user.id in gban_list:
         try:
             await client.ban_chat_member(message.chat.id, message.from_user.id)
             return
@@ -470,16 +508,34 @@ async def anti_abuse_filter(client, message):
             pass
         return
 
+    # Link filter with whitelist
+    if message.text and re.search(r'(https?://\S+|t\.me/\S+)', message.text):
+        is_whitelisted = False
+        for domain in link_whitelist:
+            if domain in message.text:
+                is_whitelisted = True
+                break
+        
+        if not is_whitelisted:
+            try:
+                await message.delete()
+                await client.send_message(message.chat.id, f"❌ **{message.from_user.first_name}**, ग्रुप में लिंक भेजने की अनुमति नहीं है।")
+            except Exception:
+                pass
+    
+    # File type restriction
+    if message.document:
+        file_name, file_extension = os.path.splitext(message.document.file_name.lower())
+        if file_extension in restricted_file_types:
+            try:
+                await message.delete()
+                await client.send_message(message.chat.id, f"❌ **{message.from_user.first_name}**, इस प्रकार की फ़ाइलें भेजने की अनुमति नहीं है।")
+            except Exception:
+                pass
+
     if message.forward_from or message.forward_from_chat:
         try:
             await message.delete()
-        except Exception:
-            pass
-
-    if re.search(r'(https?://\S+|t\.me/\S+)', message.text or ''):
-        try:
-            await message.delete()
-            await client.send_message(message.chat.id, f"❌ **{message.from_user.first_name}**, ग्रुप में लिंक भेजने की अनुमति नहीं है।")
         except Exception:
             pass
 
@@ -490,6 +546,35 @@ async def anti_abuse_filter(client, message):
             await client.send_message(message.chat.id, f"❌ **{message.from_user.first_name}**, ग्रुप में ऐसी भाषा का प्रयोग न करें।")
         except Exception:
             pass
+
+@bot.on_message(filters.group & filters.command("whitelist"))
+async def add_whitelist_domain(client, message):
+    if not await is_admin_or_owner(message):
+        return await message.reply("❌ आप यह कमांड इस्तेमाल नहीं कर सकते।")
+    
+    parts = message.text.split()
+    if len(parts) < 2:
+        return await message.reply("❌ सही इस्तेमाल: `/whitelist <domain>`")
+    
+    domain = parts[1].replace('https://', '').replace('http://', '').strip('/')
+    link_whitelist.add(domain)
+    await message.reply(f"✅ `{domain}` को लिंक की अनुमति वाली लिस्ट में जोड़ा गया है।")
+
+@bot.on_message(filters.group & filters.command("restrictfiletype"))
+async def restrict_file_type(client, message):
+    if not await is_admin_or_owner(message):
+        return await message.reply("❌ आप यह कमांड इस्तेमाल नहीं कर सकते।")
+    
+    parts = message.text.split()
+    if len(parts) < 2:
+        return await message.reply("❌ सही इस्तेमाल: `/restrictfiletype <.ext>`")
+        
+    file_extension = parts[1].lower()
+    if not file_extension.startswith('.'):
+        file_extension = '.' + file_extension
+        
+    restricted_file_types.add(file_extension)
+    await message.reply(f"✅ `{file_extension}` फ़ाइल टाइप को प्रतिबंधित कर दिया गया है।")
 
 # --- Automations & Workflows ---
 @bot.on_message(filters.group & filters.text & ~filters.via_bot & filters.regex(r'(?i)^(hi|hello|namaste|rules|help)$'))
@@ -509,111 +594,106 @@ async def automation_handler(client, message):
         await message.reply("मैं आपकी मदद कैसे कर सकता हूँ? `/help` कमांड का प्रयोग करें या नीचे दिए गए बटन पर क्लिक करें।",
                             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❓ Help Menu", callback_data="show_help")]]))
 
-# --- New Features ---
-@bot.on_message(filters.group & filters.command("quote"))
-async def send_random_quote(_, message):
-    quote = random.choice(QUOTES)
-    await message.reply(f"💬 **Quote of the Day**\n\n{quote}")
+# --- New Games and Fun ---
+@bot.on_message(filters.group & filters.command("truth"))
+async def truth_game(_, message):
+    question = random.choice(TRUTH_QUESTIONS)
+    await message.reply(f"💡 **Truth**: {question}")
 
-@bot.on_message(filters.group & filters.command("gban") & filters.user(OWNER_ID))
-async def global_ban(client, message):
-    target_user = await extract_target_user(message)
-    if not target_user:
+@bot.on_message(filters.group & filters.command("dare"))
+async def dare_game(_, message):
+    challenge = random.choice(DARE_CHALLENGES)
+    await message.reply(f"🔥 **Dare**: {challenge}")
+
+@bot.on_message(filters.group & filters.command("trivia"))
+async def start_trivia(_, message):
+    if message.chat.id in trivia_game:
+        return await message.reply("❌ एक क्विज़ पहले से ही चल रही है।")
+    
+    question = random.choice(list(TRIVIA_QUESTIONS.keys()))
+    trivia_game[message.chat.id] = {"question": question, "answer": TRIVIA_QUESTIONS[question]}
+    
+    await message.reply(f"🧠 **Trivia**: {question}\n\nआपका उत्तर इस पर रिप्लाई करके दें।")
+
+@bot.on_message(filters.group & filters.text & filters.reply & filters.regex(r'^(?i)\S+'))
+async def check_trivia_answer(_, message):
+    if not message.reply_to_message or message.chat.id not in trivia_game:
         return
     
-    gban_list.add(target_user.id)
-    await message.reply(f"🚫 **{target_user.first_name}** को सभी ग्रुप्स से बैन कर दिया गया है।")
-
-@bot.on_message(filters.group & filters.command("ungban") & filters.user(OWNER_ID))
-async def global_unban(client, message):
-    target_user = await extract_target_user(message)
-    if not target_user:
+    if message.reply_to_message.from_user.id != bot.me.id:
         return
-    
-    if target_user.id in gban_list:
-        gban_list.remove(target_user.id)
-        await message.reply(f"✅ **{target_user.first_name}** को ग्लोबल बैन से हटा दिया गया है।")
+        
+    if "Trivia" not in message.reply_to_message.text:
+        return
+        
+    if message.text.lower() == trivia_game[message.chat.id]["answer"].lower():
+        await message.reply(f"🎉 **सही जवाब!** **{message.from_user.first_name}** ने सही जवाब दिया।")
+        del trivia_game[message.chat.id]
     else:
-        await message.reply("❌ यह सदस्य ग्लोबल बैन लिस्ट में नहीं है।")
+        await message.reply("❌ **गलत जवाब।** फिर से कोशिश करें।")
 
-@bot.on_message(filters.group & filters.command("save"))
-async def save_note(_, message):
-    parts = message.text.split(" ", 2)
-    if len(parts) < 3:
-        return await message.reply("❌ सही इस्तेमाल: `/save <note_name> <text>`")
+@bot.on_message(filters.group & filters.command("poll"))
+async def poll_command(_, message):
+    args = message.text.split()[1:]
+    if len(args) < 3:
+        await message.reply("❌ कृपया एक सवाल और कम से कम दो विकल्प दें।\nसही इस्तेमाल: `/poll आपका सवाल? ऑप्शन1 ऑप्शन2 ...`")
+        return
+
+    question = args[0]
+    options = args[1:]
     
-    note_name = parts[1].lower()
-    note_text = parts[2]
-    
-    if note_name in notes_data:
-        return await message.reply("❌ इस नाम का नोट पहले से मौजूद है।")
+    try:
+        await bot.send_poll(
+            chat_id=message.chat.id,
+            question=question,
+            options=options,
+            is_anonymous=False
+        )
+        await message.delete()
+    except Exception as e:
+        await message.reply(f"❌ पोल बनाने में एक समस्या आई।\nError: {e}")
+
+@bot.on_message(filters.group & filters.command("couple"))
+async def couple_command(client, message):
+    try:
+        members = []
+        async for member in client.get_chat_members(message.chat.id):
+            if not member.user.is_bot:
+                members.append(member.user)
         
-    notes_data[note_name] = note_text
-    await message.reply(f"✅ नोट `{note_name}` सफलतापूर्वक सेव हो गया है।")
+        if len(members) < 2:
+            await message.reply("❌ इस कमांड के लिए कम से कम 2 सदस्य होने चाहिए।")
+            return
 
-@bot.on_message(filters.group & filters.command("notes"))
-async def get_notes(_, message):
-    if not notes_data:
-        return await message.reply("❌ अभी तक कोई नोट सेव नहीं हुआ है।")
-    
-    notes_list = "\n".join(notes_data.keys())
-    await message.reply(f"📝 **उपलब्ध नोट्स:**\n\n`{notes_list}`")
-
-@bot.on_message(filters.group & filters.command("getnotes"))
-async def get_note(_, message):
-    parts = message.text.split(" ", 1)
-    if len(parts) < 2:
-        return await message.reply("❌ सही इस्तेमाल: `/getnotes <note_name>`")
-    
-    note_name = parts[1].lower()
-    
-    if note_name not in notes_data:
-        return await message.reply("❌ इस नाम का कोई नोट नहीं मिला।")
+        couple = random.sample(members, 2)
         
-    await message.reply(notes_data[note_name])
-
-@bot.on_message(filters.group & filters.command("deletenote"))
-async def delete_note(client, message):
-    if not await is_admin_or_owner(message):
-        return await message.reply("❌ आप यह कमांड इस्तेमाल नहीं कर सकते।")
-    
-    parts = message.text.split(" ", 1)
-    if len(parts) < 2:
-        return await message.reply("❌ सही इस्तेमाल: `/deletenote <note_name>`")
-    
-    note_name = parts[1].lower()
-    
-    if note_name not in notes_data:
-        return await message.reply("❌ इस नाम का कोई नोट नहीं मिला।")
+        caption = (
+            f"❤️ **Group Couple of the Day** ❤️\n\n"
+            f"**{couple[0].first_name}** 💘 **{couple[1].first_name}**"
+        )
         
-    del notes_data[note_name]
-    await message.reply(f"✅ नोट `{note_name}` सफलतापूर्वक डिलीट हो गया है।")
+        await message.reply(caption)
+    except Exception as e:
+        await message.reply(f"❌ इस कमांड को चलाने में एक समस्या आई।\nError: {e}")
 
-@bot.on_message(filters.group & filters.command("admins"))
-async def list_admins(client, message):
-    admins = []
-    async for member in client.get_chat_members(message.chat.id, filter="administrators"):
-        admins.append(f"**{member.user.first_name}** (`{member.user.id}`)")
-        
-    if not admins:
-        return await message.reply("❌ इस ग्रुप में कोई एडमिन नहीं है।")
-        
-    admins_text = "🛡️ **ग्रुप एडमिन:**\n\n" + "\n".join(admins)
-    await message.reply(admins_text)
+@bot.on_message(filters.group & filters.command("dice"))
+async def dice_command(client, message):
+    await client.send_dice(message.chat.id)
 
-@bot.on_message(filters.group & filters.command("ping"))
-async def ping_command(_, message):
-    start_time = time.time()
-    await message.reply(" pong!")
-    end_time = time.time()
-    latency = round((end_time - start_time) * 1000)
-    await message.edit_text(f"🚀 **Pong!**\n`{latency}ms`")
+@bot.on_message(filters.group & filters.command("tts"))
+async def tts_command(client, message):
+    text = " ".join(message.command[1:])
+    if not text:
+        return await message.reply("❌ कृपया कोई टेक्स्ट दें।\nसही इस्तेमाल: `/tts नमस्ते, आप कैसे हैं?`")
+    
+    try:
+        tts = gTTS(text=text, lang='hi', slow=False)
+        tts.save("tts.mp3")
+        await client.send_audio(chat_id=message.chat.id, audio="tts.mp3", caption=f"टेक्स्ट-टू-स्पीच द्वारा भेजा गया:\n`{text}`")
+        os.remove("tts.mp3")
+    except Exception as e:
+        await message.reply(f"❌ ऑडियो बनाने में एक समस्या आई।\nError: {e}")
 
-# --- All other features (already implemented) ---
-# ... (all other commands from the previous update go here)
-# Since the code block is too large, I'm showing a placeholder. You should paste all the previous code here.
-
-# --- Voice to Text (VTT) ---
 @bot.on_message(filters.group & filters.command("vtt"))
 async def voice_to_text_command(client, message):
     if not message.reply_to_message or not message.reply_to_message.voice:
@@ -642,10 +722,82 @@ async def voice_to_text_command(client, message):
         if os.path.exists("voice.wav"):
             os.remove("voice.wav")
 
-# ... (All other command handlers like poll, remindme, couple, etc.)
+@bot.on_message(filters.group & filters.command("getfile"))
+async def get_file_from_sticker(client, message):
+    if not message.reply_to_message or not message.reply_to_message.sticker:
+        return await message.reply("❌ कृपया एक स्टिकर पर रिप्लाई करें।")
 
+    try:
+        file_path = await message.reply_to_message.download()
+        await message.reply_document(document=file_path)
+        os.remove(file_path)
+    except Exception as e:
+        await message.reply(f"❌ स्टिकर को फ़ाइल में बदलने में समस्या आई।\nError: {e}")
+
+@bot.on_message(filters.group & filters.command("gadminbroadcast") & filters.user(OWNER_ID))
+async def group_admin_broadcast(client, message):
+    broadcast_text = message.text.split(" ", 1)
+    if len(broadcast_text) < 2:
+        return await message.reply("❌ कृपया वह मैसेज दें जिसे आप ब्रॉडकास्ट करना चाहते हैं।")
+    
+    success_count = 0
+    failure_count = 0
+    
+    async for dialog in client.get_dialogs():
+        if dialog.chat.type in [ChatType.GROUP, ChatType.SUPERGROUP, ChatType.CHANNEL]:
+            try:
+                chat_member = await client.get_chat_member(dialog.chat.id, bot.me.id)
+                if chat_member.status == ChatMemberStatus.ADMINISTRATOR:
+                    await client.send_message(dialog.chat.id, broadcast_text[1])
+                    success_count += 1
+            except Exception:
+                failure_count += 1
+    
+    await message.reply(f"✅ मैसेज सफलतापूर्वक भेजा गया।\nसफलता: {success_count}\nविफलता: {failure_count}")
+
+@bot.on_message(filters.group & filters.command("backup") & filters.user(OWNER_ID))
+async def backup_data(_, message):
+    save_data()
+    await message.reply("✅ डेटा का बैकअप सफलतापूर्वक ले लिया गया है।")
+
+@bot.on_message(filters.group & filters.command("restore") & filters.user(OWNER_ID))
+async def restore_data(_, message):
+    load_data()
+    await message.reply("✅ डेटा सफलतापूर्वक रीस्टोर कर दिया गया है।")
+
+@bot.on_message(filters.group & filters.command("settitle"))
+async def set_group_title(client, message):
+    if not await is_admin_or_owner(message):
+        return await message.reply("❌ आप यह कमांड इस्तेमाल नहीं कर सकते।")
+    
+    new_title = message.text.split(" ", 1)
+    if len(new_title) < 2:
+        return await message.reply("❌ कृपया एक नया शीर्षक दें।")
+
+    try:
+        await client.set_chat_title(message.chat.id, new_title[1])
+        await message.reply("✅ ग्रुप का शीर्षक बदल दिया गया है।")
+    except Exception as e:
+        await message.reply(f"❌ शीर्षक बदलने में एक समस्या आई।\nError: {e}")
+
+@bot.on_message(filters.group & filters.command("setphoto"))
+async def set_group_photo(client, message):
+    if not await is_admin_or_owner(message):
+        return await message.reply("❌ आप यह कमांड इस्तेमाल नहीं कर सकते।")
+    
+    if not message.reply_to_message or not message.reply_to_message.photo:
+        return await message.reply("❌ कृपया एक फ़ोटो पर रिप्लाई करें।")
+
+    try:
+        photo_path = await message.reply_to_message.download()
+        await client.set_chat_photo(message.chat.id, photo=photo_path)
+        await message.reply("✅ ग्रुप की फ़ोटो बदल दी गई है।")
+        os.remove(photo_path)
+    except Exception as e:
+        await message.reply(f"❌ फ़ोटो बदलने में एक समस्या आई।\nError: {e}")
+
+# The bot will now start and load the data.
 if __name__ == "__main__":
+    load_data()
     print("Bot started. Press Ctrl+C to stop.")
-    asyncio.get_event_loop().create_task(send_scheduled_messages())
-    asyncio.get_event_loop().create_task(check_auto_delete())
     bot.run()
