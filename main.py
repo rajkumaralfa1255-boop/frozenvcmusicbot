@@ -7,7 +7,6 @@ import logging
 import asyncio
 import random
 import requests
-from pydub import AudioSegment
 from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
 from flask import Flask, request
