@@ -10,8 +10,6 @@ services:
         sync: false
       - key: API_ID
         sync: false
-      - key: ASSISTANT_SESSION
-        sync: false
       - key: BOT_TOKEN
         sync: false
       - key: OWNER_ID
