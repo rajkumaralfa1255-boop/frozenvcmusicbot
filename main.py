@@ -6,7 +6,6 @@ import json
 import logging
 import asyncio
 import random
-import feedparser
 import speech_recognition as sr
 from pydub import AudioSegment
 from datetime import datetime, timezone, timedelta
