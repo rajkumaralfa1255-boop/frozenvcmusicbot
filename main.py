@@ -20,7 +20,7 @@ from pyrogram.types import (
     ChatPermissions,
     ChatMember,
 )
-from gtts import gTTS
+
 
 # Load environment variables
 load_dotenv()
