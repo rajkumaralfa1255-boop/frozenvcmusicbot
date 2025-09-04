@@ -29,8 +29,8 @@ API_ID = int(os.environ.get("API_ID"))
 API_HASH = os.environ.get("API_HASH")
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 OWNER_ID = int(os.getenv("OWNER_ID", "5268762773"))
-LOG_CHANNEL_ID = int(os.getenv("LOG_CHANNEL_ID", None))
-OPENWEATHER_API_KEY = os.environ.get("OPENWEATHER_API_KEY", None)
+LOG_CHANNEL_ID = int(os.getenv("-1002107533268", None))
+
 
 # Initialize the bot client
 session_name = os.environ.get("SESSION_NAME", "help_bot")
